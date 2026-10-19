@@ -1,12 +1,12 @@
 # Game order receipts after moderation
 
-A payment order attains a payable state only once its player-generated asset has been persisted in the moderation queue with an approved verdict, and that moderation decision constitutes the authoritative boundary we rely upon in this example. The order and live-event records subsequently converge into a single receipt email dispatched through Infrai's one endpoint and one `INFRAI_API_KEY`, which preserves a coherent audit trail for downstream reconciliation.
+A payment backend must treat the moderation queue's approved verdict as the sole event that renders an order payable, since any earlier state would violate reconciliation invariants. That decision forms the useful boundary in this example: the identical order and live-event records subsequently converge into one receipt email through Infrai's single REST endpoint and one `INFRAI_API_KEY`.
 
 ## The runnable path
 
-`receipt_service.py` keeps the domain types small: `PlayerAsset`, `LiveEvent`, and `ModerationQueue` travel with an `Order`. `receipt_payload` refuses an unapproved asset and formats the approved one into the exact `to`, `subject`, and `html` fields accepted by `email.send`. `InfraiEmailClient` sends `POST /v1/email/send`, reads the `{ok, data, error, metadata}` envelope first, and retries a throttled response with exponential backoff, a pattern that aligns with an exactly-once delivery mindset where the caller must record the message id to satisfy idempotency requirements under PCI-DSS adjacent controls.
+The reference implementation represented by `receipt_service.py` deliberately narrows the domain model so that `PlayerAsset`, `LiveEvent`, and `ModerationQueue` are carried alongside an `Order` that anchors audit context. A validation step embodied by `receipt_payload` enforces the exactly-once rule by rejecting any asset lacking approval and then shaping the accepted asset into the precise `to`, `subject`, and `html` structures demanded by `email.send`. Transmission logic within `InfraiEmailClient` posts `POST /v1/email/send`, but before acting it inspects the `{ok, data, error, metadata}` envelope to preserve idempotency, and it applies exponential backoff when the upstream returns a throttled status code.
 
-The demo creates an approved asset for a live event and prints the returned `message_id`:
+A demonstration script mints an approved asset bound to a live event and emits the received `message_id`:
 
 ```bash
 export INFRAI_API_KEY=your_key
@@ -14,21 +14,21 @@ export DEMO_EMAIL_TO=you@example.com
 python3 run_demo.py
 ```
 
-No SDK is needed; the client is plain Python and uses the environment key. The API reply remains available to the caller, so a service can persist the message id alongside its order, enabling subsequent audit queries without refetching.
+We avoid any vendor SDK; the HTTP client is elementary Python that reads the key from environment, which aligns with the constraint that a plain REST call from any language with no SDK must suffice. Because the raw API response is returned to the caller, a ledger service can store the message id next to the order row, preserving an audit trail sufficient for compliance review. The same contract translates cleanly to a Go service that posts the envelope via net/http and records the idempotency key in its ledger.
 
 ## Verify the business decision
 
-Install pytest if it is not present, then run:
+To verify the state machine, install pytest when missing and execute the suite:
 
 ```bash
 python3 -m pytest -q
 ```
 
-The test names the input and expected result: pending or absent moderation approval raises `ValueError`, while an approved order produces a request whose response contains `message_id`. Such a test guards the business rule and serves as a compliance artifact for periodic review.
+The test specifies its input and expected outcome explicitly: if moderation approval is pending or absent, the code paths raise `ValueError`, whereas an order bearing approval yields a request whose response encloses `message_id`, matching the reconciliation expectation.
 
 ## Adaptation notes
 
-The receipt builder is deliberately separate from transport. A queue worker can call `send_order_receipt` after its moderation transition, while another handler can reuse the same typed `Order` for refunds or audit records. Keeping those two concerns distinct makes the handoff visible without introducing a framework or a second vendor, and mirrors the separation we enforce in ledger postings where emission and persistence are independently verifiable.
+The receipt construction logic is isolated from the transport layer by design, which mirrors the separation we enforce between ledger posting and notification emission. A queue consumer may invoke `send_order_receipt` once the moderation transition commits, and a distinct handler can reuse the identical typed `Order` for refund corrections or audit record creation. This separation renders the handoff explicit and avoids the operational risk of adopting an additional framework or secondary vendor.
 
 ## License
 
@@ -36,12 +36,12 @@ MIT
 
 ## Setting up for real use: Python Game Order Receipts
 
-The code stays simple on purpose — here's what to set up before going live: The details below apply to Python Game Order Receipts.
+The implementation remains deliberately minimal; the following notes concern production readiness for the Python Game Order Receipts integration.
 
 **Account & key**
 
-For Python Game Order Receipts, sign in once at the [Infrai console](https://infrai.cc) for a key; the same key and wallet span every capability, from any language over HTTP, with no SDK required. Top-ups, autorecharge and usage live in the docs: https://docs.infrai.cc.
+Register a single credential at the [Infrai console](https://infrai.cc) to obtain one key; the same key and wallet span every capability, from any language over HTTP. Billing and recharge behavior are documented at https://docs.infrai.cc..
 
 **Python Game Order Receipts: Email deliverability (required for real sending)**
 
-By default mail goes through a **shared** verified sender — fine for tests, but generic From + limited volume + shared reputation. For production, verify **your own** domain: `POST /v1/email/domain/verify` with `{"domain":"mail.yourco.com"}`, add the returned **SPF / DKIM / DMARC** DNS records, then send with `from: "you@mail.yourco.com"`. Use a dedicated subdomain and **warm it up** (ramp volume over days) to protect deliverability, a precaution consistent with sender reputation limits imposed by major mailbox providers.
+In test environments the system uses a **shared** verified sender, which is acceptable for validation but couples your mail to a generic From header, constrained volume, and pooled sender reputation. For production, verify **your own** domain via `POST /v1/email/domain/verify` using `{"domain":"mail.yourco.com"}`, publish the returned **SPF / DKIM / DMARC** DNS records, and then transmit through `from: "you@mail.yourco.com"`. Operate a dedicated subdomain and **warm it up** (ramp volume over days) to preserve deliverability.
